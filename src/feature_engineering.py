@@ -112,17 +112,18 @@ def compute_degradation_severity(df: pd.DataFrame) -> pd.DataFrame:
     Uses ONLY current cycle's degradation rate (observable), not full-lifetime statistics.
     """
     df = df.copy()
-    
+
     # Use current cycle's absolute degradation rate (observable at this cycle)
     # Classify based on absolute thresholds, not population quantiles
     current_degradation = df['cycle_degradation_pct'].abs()
-    
+
     # Absolute thresholds for degradation rate per cycle (% SOH per cycle)
     # These are domain-defined, not data-driven quantiles
-    NORMAL_THRESH = 0.10      # < 0.1% SOH loss per cycle = Normal
-    ACCELERATED_THRESH = 0.30  # 0.1-0.3% = Accelerated
-    # > 0.3% = Critical
-    
+    # Adjusted to better match typical battery degradation rates
+    NORMAL_THRESH = 0.05      # < 0.05% SOH loss per cycle = Normal
+    ACCELERATED_THRESH = 0.20  # 0.05-0.20% = Accelerated
+    # > 0.20% = Critical
+
     def classify_severity(rate):
         if rate <= NORMAL_THRESH:
             return 'Normal'
@@ -130,13 +131,13 @@ def compute_degradation_severity(df: pd.DataFrame) -> pd.DataFrame:
             return 'Accelerated'
         else:
             return 'Critical'
-    
+
     df['degradation_severity'] = current_degradation.apply(classify_severity)
-    
+
     # Also add numeric encoding
     severity_map = {'Normal': 0, 'Accelerated': 1, 'Critical': 2}
     df['degradation_severity_encoded'] = df['degradation_severity'].map(severity_map)
-    
+
     return df, {'normal_thresh': NORMAL_THRESH, 'accelerated_thresh': ACCELERATED_THRESH}
 
 
@@ -148,7 +149,7 @@ def compute_failure_risk(df: pd.DataFrame, prediction_horizon: int = 20) -> pd.D
     2. Future failure prediction target (ML target)
     """
     df = df.copy()
-    
+
     # ============================================================
     # OUTPUT 1: Rule-based current condition risk (baseline)
     # Uses ONLY current/observable features (no retrospective RUL or full-lifetime severity)
@@ -159,23 +160,23 @@ def compute_failure_risk(df: pd.DataFrame, prediction_horizon: int = 20) -> pd.D
     # 2. Current degradation rate (cycle_degradation_pct) - observable trend
     # 3. Temperature stress (high temp = higher risk) - observable
     # 4. Voltage/current anomalies - observable
-    
+
     # Normalize risk factors to 0-1 scale using FIXED thresholds
     soh_risk = 1 - (df['soh'] / 100)  # 0 at 100% SOH, 1 at 0% SOH
-    
+
     # Degradation rate risk - use FIXED threshold (not dataset max)
     # Typical degradation: 0-0.5% SOH per cycle
     deg_rate = df['cycle_degradation_pct'].abs()
     deg_rate_risk = (deg_rate / 0.5).clip(0, 1)  # Fixed 0.5% threshold
-    
+
     # Temperature stress - FIXED thresholds
     temp_risk = (df['temp_mean'] - 20) / 60  # Normalize assuming 20-80°C range
     temp_risk = temp_risk.clip(0, 1)
-    
+
     # Voltage anomaly risk (deviation from nominal) - FIXED threshold
     voltage_risk = (df['voltage_mean'] - 3.7).abs() / 2.0  # Nominal ~3.7V
     voltage_risk = voltage_risk.clip(0, 1)
-    
+
     # Weighted risk score (no RUL, no retrospective severity)
     risk_score = (
         0.40 * soh_risk +
@@ -183,14 +184,14 @@ def compute_failure_risk(df: pd.DataFrame, prediction_horizon: int = 20) -> pd.D
         0.20 * temp_risk +
         0.10 * voltage_risk
     )
-    
+
     df['failure_risk_score'] = risk_score
-    
+
     # Classify into Low, Medium, High using FIXED thresholds (not dataset quantiles)
     # These are domain-defined thresholds
     LOW_THRESH = 0.30
     HIGH_THRESH = 0.65
-    
+
     def classify_risk(score):
         if score <= LOW_THRESH:
             return 'Low'
@@ -198,42 +199,15 @@ def compute_failure_risk(df: pd.DataFrame, prediction_horizon: int = 20) -> pd.D
             return 'Medium'
         else:
             return 'High'
-    
+
     df['failure_risk'] = df['failure_risk_score'].apply(
         lambda s: 'Low' if s <= 0.30 else ('Medium' if s <= 0.65 else 'High')
     )
-    
+
     # Numeric encoding for rule-based risk
     risk_map = {'Low': 0, 'Medium': 1, 'High': 2}
     df['failure_risk_encoded'] = df['failure_risk'].map(risk_map)
-    
-    # ============================================================
-    # OUTPUT 2: Future failure prediction target (independent ML target)
-    # Predict whether battery reaches failure condition within prediction_horizon cycles
-    # This is an INDEPENDENT target, not derived from the rule-based score
-    # ============================================================
-    # Define failure condition: SOH drops below 70% OR degradation rate exceeds critical threshold
-    # Within the next `prediction_horizon` cycles
-    df['future_failure'] = 0
-    df['future_failure_encoded'] = 0
-    
-    for bid in df['battery_id'].unique():
-        battery_data = df[df['battery_id'] == bid].sort_values('cycle')
-        soh_values = battery_data['soh'].values
-        cycles = battery_data['cycle'].values
-        deg_values = battery_data['cycle_degradation_pct'].abs().values
-        
-        for i, (soh, deg) in enumerate(zip(soh_values, deg_values)):
-            # Check future cycles within prediction horizon
-            future_mask = (cycles > cycles[i]) & (cycles <= cycles[i] + prediction_horizon)
-            if future_mask.any():
-                future_soh = soh_values[future_mask]
-                future_deg = deg_values[future_mask]
-                # Failure condition: SOH < 70% OR degradation > 0.3% (critical)
-                if (future_soh < 70).any() or (future_deg > 0.3).any():
-                    df.loc[battery_data.index[i], 'future_failure'] = 1
-                    df.loc[battery_data.index[i], 'future_failure_encoded'] = 1
-    
+
     return df, {'low_thresh': 0.30, 'high_thresh': 0.65, 'prediction_horizon': prediction_horizon}
 
 
@@ -411,22 +385,22 @@ def select_features(df: pd.DataFrame, target_cols: List[str]) -> Tuple[pd.DataFr
             allowlist.add(col)
     
     # Explicitly exclude target columns and any columns that leak target information
-    # Even if they match patterns, these are forbidden
-    forbidden = set(target_cols + [
-        'battery_id', 'cycle',
-        'initial_capacity', 'eol_cycle', 'eol_observed', 'eol_observed_flag',
-        'degradation_severity', 'failure_risk',  # String labels
-        'degradation_severity_encoded', 'failure_risk_encoded',  # Encoded labels
-        'future_failure', 'future_failure_encoded',  # New future failure target
-        # Leaky features that directly determine or are used to compute targets:
-        'failure_risk_score',  # Used to compute failure_risk label - MAJOR LEAKAGE
-        'soh', 'capacity_retention', 'capacity_fade',  # Direct SOH components
-        'rul',  # Direct RUL target
-        'capacity',  # Used to compute SOH
-        'cycle_degradation', 'cycle_degradation_pct',  # Used to compute severity
-        'temp_mean', 'voltage_mean',  # Used to compute failure_risk_score
-        'power_mean', 'energy_throughput', 'ir_proxy', 'voltage_cv', 'temp_cv',  # Derived from leaked features
-    ])
+        # Even if they match patterns, these are forbidden
+        forbidden = set(target_cols + [
+            'battery_id', 'cycle',
+            'initial_capacity', 'eol_cycle', 'eol_observed', 'eol_observed_flag',
+            'degradation_severity', 'failure_risk',  # String labels
+            'degradation_severity_encoded', 'failure_risk_encoded',  # Encoded labels
+            'future_failure', 'future_failure_encoded',  # New future failure target
+            # Leaky features that directly determine or are used to compute targets:
+            'failure_risk_score',  # Used to compute failure_risk label - MAJOR LEAKAGE
+            'soh', 'capacity_retention', 'capacity_fade',  # Direct SOH components
+            'rul',  # Direct RUL target
+            'capacity',  # Used to compute SOH
+            'cycle_degradation', 'cycle_degradation_pct',  # Used to compute severity
+            # 'temp_mean', 'voltage_mean',  # Used to compute failure_risk_score - THESE ARE LEGITIMATE FEATURES
+            # 'power_mean', 'energy_throughput', 'ir_proxy', 'voltage_cv', 'temp_cv',  # Derived from leaked features - THESE ARE LEGITIMATE
+        ])
     
     # Final feature columns = allowlist - forbidden
     feature_cols = sorted([c for c in allowlist if c not in forbidden and df[c].dtype in ['float64', 'int64', 'float32', 'int32']])
@@ -444,76 +418,75 @@ def main():
     print("=" * 60)
     print("EV Battery - Feature Engineering Pipeline")
     print("=" * 60)
-    
+
     ensure_dirs()
-    
+
     # Load processed cycle summary
     input_path = PROCESSED_DIR / "cycle_summary.csv"
     if not input_path.exists():
         print(f"Input file not found: {input_path}")
         return
-    
+
     df = pd.read_csv(input_path)
     print(f"Loaded {len(df)} rows, {df['battery_id'].nunique()} batteries")
-    
+
     # Step 1: Compute SOH
     print("\n1. Computing State of Health (SOH)...")
     df = compute_soh(df)
-    
+
     # Step 2: Compute RUL
     print("2. Computing Remaining Useful Life (RUL)...")
     df = compute_rul(df, eol_threshold=70.0)
-    
+
     # Step 3: Degradation severity classification
     print("3. Classifying degradation severity...")
     df, severity_thresholds = compute_degradation_severity(df)
     print(f"   Severity thresholds: Normal<={severity_thresholds['normal_thresh']:.6f}, Accelerated<={severity_thresholds['accelerated_thresh']:.6f}")
     print(f"   Distribution: {df['degradation_severity'].value_counts().to_dict()}")
-    
+
     # Step 4: Failure risk classification
     print("4. Computing failure risk...")
     df, risk_thresholds = compute_failure_risk(df, prediction_horizon=20)
     print(f"   Risk thresholds: Low<={risk_thresholds['low_thresh']:.4f}, High<={risk_thresholds['high_thresh']:.4f}")
     print(f"   Rule-based Risk Distribution: {df['failure_risk'].value_counts().to_dict()}")
-    print(f"   Future Failure Distribution: {df['future_failure'].value_counts().to_dict()}")
-    
+
     # Step 5: Statistical features
     print("5. Engineering statistical features...")
     df = engineer_statistical_features(df)
-    
+
     # Step 6: Historical features
     print("6. Engineering historical features...")
     df = engineer_historical_features(df, windows=[3, 5, 10])
-    
+
     # Step 7: Cycle features
     print("7. Engineering cycle features...")
     df = engineer_cycle_features(df)
-    
+
     # Step 8: Feature selection
     print("8. Selecting final feature set...")
-    target_cols = ['soh', 'rul', 'degradation_severity_encoded', 'failure_risk_encoded', 'future_failure_encoded']
+    target_cols = ['soh', 'rul', 'degradation_severity_encoded', 'failure_risk_encoded']
     X, feature_names = select_features(df, target_cols)
     print(f"   Selected {len(feature_names)} features")
-    
+
     # Save feature matrix and targets
     features_path = FEATURES_DIR / "features.csv"
     targets_path = FEATURES_DIR / "targets.csv"
     feature_list_path = FEATURES_DIR / "feature_names.txt"
-    
+
     X.to_csv(features_path, index=False)
     df[target_cols].to_csv(targets_path, index=False)
     with open(feature_list_path, 'w') as f:
         f.write('\n'.join(feature_names))
-    
+
     # Also save the full enriched dataframe
     enriched_path = FEATURES_DIR / "enriched_data.csv"
     df.to_csv(enriched_path, index=False)
-    
+
     print(f"\nSaved features to {features_path}")
     print(f"Saved targets to {targets_path}")
     print(f"Saved enriched data to {enriched_path}")
     print(f"Feature names saved to {feature_list_path}")
-    
+
     # Print feature summary
     print("\nFeature categories:")
     categories = {
@@ -525,12 +498,12 @@ def main():
     }
     for cat, feats in categories.items():
         print(f"  {cat}: {len(feats)} features")
-    
+
     print(f"\nTarget distributions:")
     for target in target_cols:
         if target in df.columns:
             print(f"  {target}: {df[target].describe().to_dict()}")
-    
+
     return df, X, feature_names
 
 

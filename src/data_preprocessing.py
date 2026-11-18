@@ -164,55 +164,67 @@ def create_synthetic_data(n_batteries: int = 8, n_cycles: int = 200) -> pd.DataF
     Used as fallback when real data is not available.
     """
     print(f"Creating synthetic data: {n_batteries} batteries, ~{n_cycles} cycles each")
-    
+
     np.random.seed(42)
     all_data = []
-    
+
     # Battery IDs like NASA dataset
     battery_ids = [f"B{str(i).zfill(4)}" for i in range(5, 5 + n_batteries)]
-    
-    for bid in battery_ids:
+
+    # Pre-define degradation profiles to ensure class balance
+    # We want roughly equal numbers of Normal, Accelerated, Critical
+    profiles = []
+    n_per_profile = n_batteries // 3
+    # Normal: slow degradation
+    profiles.extend(['Normal'] * n_per_profile)
+    # Accelerated: medium degradation
+    profiles.extend(['Accelerated'] * n_per_profile)
+    # Critical: fast degradation
+    profiles.extend(['Critical'] * (n_batteries - len(profiles)))
+    np.random.shuffle(profiles)
+
+    for idx, bid in enumerate(battery_ids):
         # Initial capacity varies slightly per battery
         initial_capacity = np.random.normal(1.1, 0.02)  # ~1.1 Ah
-        
-        # Degradation rate varies per battery (some degrade faster)
-        base_degradation = np.random.uniform(0.0005, 0.002)  # capacity loss per cycle
-        
-        # Add some batteries with accelerated degradation
-        if np.random.random() < 0.25:
-            base_degradation *= np.random.uniform(2, 4)  # Accelerated
-        elif np.random.random() < 0.1:
-            base_degradation *= np.random.uniform(5, 8)  # Critical
-        
+
+        # Degradation rate varies per battery profile
+        profile = profiles[idx]
+        if profile == 'Normal':
+            base_degradation = np.random.uniform(0.0003, 0.0008)  # Slow
+        elif profile == 'Accelerated':
+            base_degradation = np.random.uniform(0.0015, 0.0035)  # Medium
+        else:  # Critical
+            base_degradation = np.random.uniform(0.005, 0.012)  # Fast
+
         # Temperature profile
         base_temp = np.random.uniform(20, 30)
         temp_variation = np.random.uniform(2, 5)
-        
+
         for cycle in range(1, n_cycles + 1):
             # Capacity with noise and degradation
             capacity = initial_capacity * (1 - base_degradation * cycle) + np.random.normal(0, 0.005)
-            capacity = max(capacity, initial_capacity * 0.5)  # Floor at 50%
-            
+            capacity = max(capacity, initial_capacity * 0.3)  # Floor at 30%
+
             # Temperature
             ambient_temp = base_temp + np.random.normal(0, temp_variation)
             temp_mean = ambient_temp + np.random.uniform(0, 5)  # Self-heating
             temp_min = temp_mean - np.random.uniform(1, 3)
             temp_max = temp_mean + np.random.uniform(1, 5)
-            
+
             # Voltage (decreases slightly with degradation)
             voltage_mean = 3.7 - 0.1 * (1 - capacity / initial_capacity) + np.random.normal(0, 0.02)
             voltage_min = voltage_mean - np.random.uniform(0.1, 0.3)
             voltage_max = voltage_mean + np.random.uniform(0.1, 0.3)
-            
+
             # Current (typical charge/discharge)
             current_mean = np.random.uniform(-1.5, 1.5)
             current_min = current_mean - np.random.uniform(0.5, 1.0)
             current_max = current_mean + np.random.uniform(0.5, 1.0)
-            
+
             # Duration and measurements
             duration = np.random.uniform(3000, 7200)  # seconds
             n_measurements = np.random.randint(50, 200)
-            
+
             all_data.append({
                 'battery_id': bid,
                 'cycle': cycle,
@@ -230,7 +242,7 @@ def create_synthetic_data(n_batteries: int = 8, n_cycles: int = 200) -> pd.DataF
                 'temp_min': round(temp_min, 2),
                 'temp_max': round(temp_max, 2),
             })
-    
+
     df = pd.DataFrame(all_data)
     print(f"Created synthetic data: {len(df)} rows, {df['battery_id'].nunique()} batteries")
     return df

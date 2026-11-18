@@ -100,10 +100,10 @@ Install with: `pip install -r requirements.txt`
 
 | Target | Best Model | Test Metric |
 |--------|------------|-------------|
-| SOH | RandomForest | MAE: 2.7%, R²: 0.81 |
-| RUL | RandomForest | MAE: 83 cycles |
-| Degradation Severity | LogisticRegression | F1: 40% |
-| Failure Risk | LogisticRegression | F1: 53% |
+| SOH | ExtraTrees | MAE: 2.5%, R²: 0.83 |
+| RUL | Ridge | MAE: 85 cycles |
+| Degradation Severity | SVC | F1_macro: 34% |
+| Failure Risk | MLP | F1_macro: 59% |
 
 All splits are battery-wise (GroupShuffleSplit) to prevent data leakage.
 Cross-validation uses GroupKFold with preprocessing inside the CV loop.

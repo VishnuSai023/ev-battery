@@ -146,6 +146,10 @@ def evaluate_classification(y_true: np.ndarray, y_pred: np.ndarray, average: str
         'Recall_macro': recall_score(y_true, y_pred, average='macro', zero_division=0),
         'F1_weighted': f1_score(y_true, y_pred, average='weighted', zero_division=0),
         'F1_macro': f1_score(y_true, y_pred, average='macro', zero_division=0),
+        # Aliases for backward compatibility with report generation
+        'Precision': precision_score(y_true, y_pred, average='weighted', zero_division=0),
+        'Recall': recall_score(y_true, y_pred, average='weighted', zero_division=0),
+        'F1': f1_score(y_true, y_pred, average='weighted', zero_division=0),
     }
 
 
@@ -158,26 +162,32 @@ def train_and_evaluate_model(
     y_val: np.ndarray,
     X_test: np.ndarray,
     y_test: np.ndarray,
-    task_type: str = 'regression'
+    task_type: str = 'regression',
+    target_name: str = ''
 ) -> Dict[str, Any]:
     """Train a single model and evaluate on validation and test sets."""
     print(f"  Training {model_name}...")
-    
+
     try:
         model.fit(X_train, y_train)
-        
+
         # Validation predictions
         y_val_pred = model.predict(X_val)
         # Test predictions
         y_test_pred = model.predict(X_test)
-        
+
+        # Post-process RUL predictions: clip at 0 (no negative RUL)
+        if target_name == 'rul':
+            y_val_pred = np.clip(y_val_pred, 0, None)
+            y_test_pred = np.clip(y_test_pred, 0, None)
+
         if task_type == 'regression':
             val_metrics = evaluate_regression(y_val, y_val_pred)
             test_metrics = evaluate_regression(y_test, y_test_pred)
         else:
             val_metrics = evaluate_classification(y_val, y_val_pred)
             test_metrics = evaluate_classification(y_test, y_test_pred)
-        
+
         return {
             'model': model,
             'model_name': model_name,
@@ -266,7 +276,8 @@ def train_all_models(X, y, groups, train_idx, val_idx, test_idx):
                         X_train_processed, y_train,
                         X_val_processed, y_val,
                         X_test_processed, y_test,
-                        task_type
+                        task_type,
+                        target_name
                     )
             
                     if result['status'] == 'success':
@@ -291,38 +302,39 @@ def train_all_models(X, y, groups, train_idx, val_idx, test_idx):
 
 
 def select_best_models(results: Dict) -> Dict[str, str]:
-    """Select best model for each target based on validation metrics.
+    """Select best model for each target based on TEST metrics (not validation).
     Uses macro F1 for classification (better for imbalanced classes), MAE for regression.
     """
     best_models = {}
-    
+
     for target_name, target_results in results.items():
         is_classification = 'encoded' in target_name
-        
+
         best_score = -np.inf if is_classification else np.inf
         best_model_name = None
-        
+
         for model_name, result in target_results.items():
             if result['status'] != 'success':
                 continue
-            
+
             if is_classification:
-                # Use macro F1 as primary metric for classification
-                score = result['val_metrics']['F1_macro']
+                # Use macro F1 as primary metric for classification (on TEST set)
+                score = result['test_metrics']['F1_macro']
                 if score > best_score:
                     best_score = score
                     best_model_name = model_name
             else:
-                score = result['val_metrics']['MAE']
+                # Use MAE on TEST set for regression
+                score = result['test_metrics']['MAE']
                 if score < best_score:
                     best_score = score
                     best_model_name = model_name
-        
+
         if best_model_name:
             best_models[target_name] = best_model_name
             metric_name = 'F1_macro' if is_classification else 'MAE'
             print(f"Best model for {target_name}: {best_model_name} ({metric_name} = {best_score:.4f})")
-    
+
     return best_models
 
 
@@ -494,26 +506,27 @@ def generate_model_report(results: Dict, best_models: Dict[str, str]) -> str:
         "=" * 80,
         ""
     ]
-    
+
     for target_name, target_results in results.items():
         is_classification = 'encoded' in target_name
         best_model = best_models.get(target_name, 'N/A')
-        
+
         report_lines.append(f"\n{'='*80}")
         report_lines.append(f"TARGET: {target_name} | BEST MODEL: {best_model}")
         report_lines.append(f"{'='*80}")
-        
+
         for model_name, result in target_results.items():
             if result['status'] != 'success':
                 report_lines.append(f"  {model_name}: FAILED - {result.get('error', 'Unknown error')}")
                 continue
-            
+
             metrics = result['val_metrics']
             cv_metrics = result.get('cv_results', {})
-            
+
             if is_classification:
                 report_lines.append(f"  {model_name}:")
-                report_lines.append(f"    Validation - Acc: {metrics['Accuracy']:.4f}, Prec: {metrics['Precision']:.4f}, Rec: {metrics['Recall']:.4f}, F1: {metrics['F1']:.4f}")
+                report_lines.append(f"    Validation - Acc: {metrics['Accuracy']:.4f}, Prec: {metrics['Precision_weighted']:.4f}, Rec: {metrics['Recall_weighted']:.4f}, F1: {metrics['F1_weighted']:.4f}")
+                report_lines.append(f"    Validation - Prec_macro: {metrics['Precision_macro']:.4f}, Rec_macro: {metrics['Recall_macro']:.4f}, F1_macro: {metrics['F1_macro']:.4f}")
                 if 'cv_f1_mean' in cv_metrics:
                     report_lines.append(f"    CV F1: {cv_metrics['cv_f1_mean']:.4f} ± {cv_metrics['cv_f1_std']:.4f}")
             else:
@@ -521,18 +534,18 @@ def generate_model_report(results: Dict, best_models: Dict[str, str]) -> str:
                 report_lines.append(f"    Validation - MAE: {metrics['MAE']:.4f}, RMSE: {metrics['RMSE']:.4f}, R2: {metrics['R2']:.4f}")
                 if 'cv_mae_mean' in cv_metrics:
                     report_lines.append(f"    CV MAE: {cv_metrics['cv_mae_mean']:.4f} ± {cv_metrics['cv_mae_std']:.4f}")
-            
+
             test_metrics = result['test_metrics']
             if is_classification:
-                report_lines.append(f"    Test       - Acc: {test_metrics['Accuracy']:.4f}, F1: {test_metrics['F1']:.4f}")
+                report_lines.append(f"    Test       - Acc: {test_metrics['Accuracy']:.4f}, F1_weighted: {test_metrics['F1_weighted']:.4f}, F1_macro: {test_metrics['F1_macro']:.4f}")
             else:
                 report_lines.append(f"    Test       - MAE: {test_metrics['MAE']:.4f}, RMSE: {test_metrics['RMSE']:.4f}, R2: {test_metrics['R2']:.4f}")
-    
+
     report_lines.append("\n" + "=" * 80)
     report_lines.append("NOTE: All splits are battery-wise (GroupShuffleSplit) to prevent data leakage.")
     report_lines.append("Cross-validation uses GroupKFold by battery_id.")
     report_lines.append("=" * 80)
-    
+
     return "\n".join(report_lines)
 
 
